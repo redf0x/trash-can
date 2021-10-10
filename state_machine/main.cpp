@@ -1,7 +1,25 @@
+#include "types/resolve.h"
+#include "types/types.h"
+#include "types/util.h"
+#include "util/static_string.h"
+
 #include <functional>
 #include <iostream>
 #include <tuple>
+#include <type_traits>
 #include <variant>
+
+template<typename T>
+void debug(T&&)
+{
+    std::cout << __PRETTY_FUNCTION__ << std::endl;
+}
+
+#define STRINGIFY_IMPL(TYPE)                                                     \
+    [[maybe_unused]] static constexpr auto stringify(state_machine::types<TYPE>) \
+    {                                                                            \
+        return static_string{#TYPE};                                             \
+    }
 
 namespace state_machine
 {
@@ -50,6 +68,11 @@ class state_machine
         std::visit(passEventToState, currentState);
     }
 
+    constexpr static types<States...> get_state_types()
+    {
+        return {};
+    }
+
   private:
     std::tuple<States...>    states;
     std::variant<States*...> currentState{&std::get<0>(states)};
@@ -84,6 +107,12 @@ struct transition_to
     }
 };
 
+template<typename State>
+static constexpr auto stringify(types<transition_to<State>>)
+{
+    return static_string{"transition_to<"} + stringify(types<State>{}) + static_string{">"};
+}
+
 struct nothing
 {
     template<typename Machine, typename State, typename Event>
@@ -91,6 +120,11 @@ struct nothing
     {
     }
 };
+
+static constexpr auto stringify(types<nothing>)
+{
+    return static_string{"nothing"};
+}
 
 template<typename... Actions>
 struct one_of
@@ -120,6 +154,12 @@ struct maybe : public one_of<Action, nothing>
 {
     using one_of<Action, nothing>::one_of;
 };
+
+template<typename Action>
+static constexpr auto stringify(types<maybe<Action>>)
+{
+    return static_string{"maybe<"} + stringify(types<Action>{}) + static_string{">"};
+}
 
 template<typename Action>
 struct by_default
@@ -203,11 +243,182 @@ struct LockedState : public sm::by_default<sm::nothing>
     uint32_t key;
 };
 
+STRINGIFY_IMPL(OpenEvent)
+STRINGIFY_IMPL(CloseEvent)
+STRINGIFY_IMPL(LockEvent)
+STRINGIFY_IMPL(UnlockEvent)
+STRINGIFY_IMPL(ClosedState)
+STRINGIFY_IMPL(OpenState)
+STRINGIFY_IMPL(LockedState)
+
+struct Header
+{
+};
+
+struct simple_stringifier
+{
+    constexpr auto operator()(state_machine::types<Header>) const
+    {
+        return static_string{""};
+    }
+
+    template<typename T>
+    constexpr auto operator()(state_machine::types<T> type) const
+    {
+        return stringify(type);
+    }
+};
+
+template<std::size_t width>
+struct constant_width_stringifier
+{
+    constexpr auto operator()(state_machine::types<Header>) const
+    {
+        return static_string{""}.template change_length<width>(' ');
+    }
+
+    template<typename T>
+    constexpr auto operator()(state_machine::types<T> type) const
+    {
+        return stringify(type).template change_length<width>(' ');
+    }
+};
+
+template<typename Stringifier, typename State>
+class generate_row
+{
+  public:
+    constexpr generate_row(Stringifier str, state_machine::types<State>)
+      : str(str)
+    {
+    }
+
+    constexpr auto operator()(state_machine::types<State> state) const
+    {
+        return str(state);
+    }
+
+    template<typename Event>
+    constexpr auto operator()(state_machine::types<Event>) const
+    {
+        auto action = state_machine::resolve_action{}(
+          state_machine::types<state_machine::types<State, Event>>{});
+        return static_string{" | "} + str(action);
+    }
+
+  private:
+    const Stringifier str;
+};
+
+template<typename Stringifier>
+class generate_row<Stringifier, Header>
+{
+  public:
+    constexpr generate_row(Stringifier str, state_machine::types<Header>)
+      : str(str)
+    {
+    }
+
+    constexpr auto operator()(state_machine::types<Header> header) const
+    {
+        return str(header);
+    }
+
+    template<typename Event>
+    constexpr auto operator()(state_machine::types<Event> event) const
+    {
+        return static_string{" | "} + str(event);
+    }
+
+  private:
+    const Stringifier str;
+};
+
+template<typename Stringifier, typename... Events>
+class generate_table
+{
+  public:
+    constexpr generate_table(Stringifier str, sm::types<Events...>)
+      : str(str)
+    {
+    }
+
+    template<typename State>
+    constexpr auto operator()(sm::types<State> state) const
+    {
+        return (sm::types<State, Events...>{} | sm::map_and_join{generate_row{str, state}})
+               + static_string{"\n"};
+    }
+
+  private:
+    const Stringifier str;
+};
+
+template<std::size_t X>
+struct maximum
+{
+    template<std::size_t Y>
+    constexpr auto operator+(maximum<Y>) const
+    {
+        return maximum<std::max(X, Y)>{};
+    }
+
+    static constexpr auto value()
+    {
+        return X;
+    }
+};
+
+struct calculate_max_length
+{
+    template<typename T>
+    constexpr auto operator()(sm::types<T> type)
+    {
+        return maximum<stringify(type).length()>{};
+    }
+};
+
+template<typename... StateTypes, typename... EventTypes>
+constexpr auto generate_transition_table(sm::types<StateTypes...> states,
+                                         sm::types<EventTypes...> events)
+{
+    constexpr simple_stringifier stringifier;
+    constexpr auto               result =
+      (sm::types<Header>{} + states) | sm::map_and_join{generate_table{stringifier, events}};
+
+    return result;
+}
+
+template<typename... StateTypes, typename... EventTypes>
+constexpr auto generate_pretty_transition_table(sm::types<StateTypes...> states,
+                                                sm::types<EventTypes...> events)
+{
+    constexpr auto actions = (states * events) | sm::map_and_join(sm::resolve_action{});
+    constexpr auto max_width =
+      (states + events + actions) | sm::map_and_join(calculate_max_length{});
+    constexpr constant_width_stringifier<max_width.value()> stringifier{};
+    constexpr auto                                          result =
+      (sm::types<Header>{} + states) | sm::map_and_join{generate_table{stringifier, events}};
+
+    return result;
+}
+
 int main()
 {
-    sm::state_machine<ClosedState, OpenState, LockedState> sm{ClosedState{},
-                                                              OpenState{},
-                                                              LockedState{0}};
+    using SM = sm::state_machine<ClosedState, OpenState, LockedState>;
+
+    std::cout << generate_transition_table(
+                   SM::get_state_types(),
+                   sm::types<OpenEvent, CloseEvent, LockEvent, UnlockEvent>{})
+                   .data()
+              << std::endl;
+    std::cout << generate_pretty_transition_table(
+                   SM::get_state_types(),
+                   sm::types<OpenEvent, CloseEvent, LockEvent, UnlockEvent>{})
+                   .data()
+              << std::endl;
+
+    SM sm{ClosedState{}, OpenState{}, LockedState{0}};
 
     sm.handle(LockEvent{1234});
     sm.handle(UnlockEvent{2});

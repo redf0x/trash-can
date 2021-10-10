@@ -40,16 +40,18 @@ constexpr std::array<T, LeftSize + RightSize> join(const std::array<T, LeftSize>
 
 template<std::size_t NewSize, typename T, std::size_t OldSize, std::size_t... Idxs>
 constexpr std::array<T, NewSize> resize(const std::array<T, OldSize>& arr,
+                                        std::remove_const_t<T>        defaultValue,
                                         std::index_sequence<Idxs...>)
 {
-    return {arr[Idxs]...};
+    return {((Idxs < OldSize) ? arr[Idxs] : defaultValue)...};
 }
 
 template<std::size_t NewSize, typename T, std::size_t OldSize>
-constexpr std::array<T, NewSize> resize(const std::array<T, OldSize>& arr)
+constexpr std::array<T, NewSize> resize(const std::array<T, OldSize>& arr,
+                                        std::remove_const_t<T>        defaultValue)
 {
     constexpr std::size_t minSize = std::min(OldSize, NewSize);
-    return resize<NewSize>(arr, std::make_index_sequence<minSize>());
+    return resize<NewSize>(arr, defaultValue, std::make_index_sequence<minSize>());
 }
 
 template<typename T, std::size_t N, std::size_t... Idx>
